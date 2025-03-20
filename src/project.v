@@ -1,8 +1,3 @@
-/*
- * Copyright (c) 2024 Your Name
- * SPDX-License-Identifier: Apache-2.0
- */
-
 `default_nettype none
 
 module tt_um_asyfifo (
@@ -15,8 +10,6 @@ module tt_um_asyfifo (
     input  wire       clk,      // clock
     input  wire       rst_n     // reset_n - low to reset
 );
-// Dedicated inputs
-  
 
     parameter DEPTH = 8;  // FIFO depth (small for Tiny Tapeout)
     
@@ -38,11 +31,9 @@ module tt_um_asyfifo (
     always @(posedge wclk or posedge rst) begin
         if (rst) begin
             w_ptr <= 0;
-            count <= 0;
-        end else if (we && count < DEPTH) begin
+        end else if (we && count < $unsigned(DEPTH[2:0])) begin
             mem[w_ptr] <= data_in;
-            w_ptr <= w_ptr + 1;
-            count <= count + 1;
+            w_ptr <= (w_ptr + 1) % DEPTH;  // Wrap-around logic
         end
     end
 
@@ -52,23 +43,36 @@ module tt_um_asyfifo (
             r_ptr <= 0;
         end else if (re && count > 0) begin
             data_out <= mem[r_ptr];
-            r_ptr <= r_ptr + 1;
-            count <= count - 1;
+            r_ptr <= (r_ptr + 1) % DEPTH; // Wrap-around logic
+        end
+    end
+
+    // FIFO Count Management
+    always @(posedge wclk or posedge rclk or posedge rst) begin
+        if (rst) begin
+            count <= 0;
+        end else begin
+            case ({we, re})
+                2'b10: if (count < $unsigned(DEPTH[2:0])) count <= count + 1; // Write
+                2'b01: if (count > 0) count <= count - 1;  // Read
+                default: count <= count; // No change
+            endcase
         end
     end
 
     // Output assignments
     assign uo_out[3:0] = data_out; // 4-bit data output
     assign uo_out[4]   = (count == 0);  // Empty flag
-    assign uo_out[5]   = (count == DEPTH); // Full flag
+    assign uo_out[5]   = (count == DEPTH[2:0]); // Full flag
     assign uo_out[7:6] = 2'b00; // Reserved for future use
     assign uio_out     = 8'b0;  // No output on IOs
     assign uio_oe      = 8'b0;  // Set IOs to input mode
 
     // Prevent warnings for unused signals
-    wire _unused = &{ena, clk};
+    (* unused *) wire [7:5] unused_ui_in = ui_in[7:5];
+    (* unused *) wire [7:4] unused_uio_in = uio_in[7:4];
+    (* unused *) wire unused_rst_n = rst_n;
 
 endmodule
-
 
   
