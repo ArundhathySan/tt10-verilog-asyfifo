@@ -6,8 +6,6 @@ module tt_um_asyfifo (
     input  wire [7:0] uio_in,   // IOs: Input path
     output wire [7:0] uio_out,  // IOs: Output path
     output wire [7:0] uio_oe,   // IOs: Enable path (active high: 0=input, 1=output)
-    input  wire       ena,      // always 1 when the design is powered, so you can ignore it
-    input  wire       clk,      // clock
     input  wire       rst_n     // reset_n - low to reset
 );
 
@@ -31,9 +29,9 @@ module tt_um_asyfifo (
     always @(posedge wclk or posedge rst) begin
         if (rst) begin
             w_ptr <= 0;
-        end else if (we && count < $unsigned(DEPTH[2:0])) begin
+        end else if (we && count < DEPTH) begin
             mem[w_ptr] <= data_in;
-            w_ptr <= (w_ptr + 1) % DEPTH;  // Wrap-around logic
+            w_ptr <= (w_ptr + 1) & (DEPTH - 1);  // Wrap-around logic using bitwise AND
         end
     end
 
@@ -43,27 +41,31 @@ module tt_um_asyfifo (
             r_ptr <= 0;
         end else if (re && count > 0) begin
             data_out <= mem[r_ptr];
-            r_ptr <= (r_ptr + 1) % DEPTH; // Wrap-around logic
+            r_ptr <= (r_ptr + 1) & (DEPTH - 1); // Wrap-around logic using bitwise AND
         end
     end
 
-    // FIFO Count Management
-    always @(posedge wclk or posedge rclk or posedge rst) begin
+    // FIFO Count Management (Separate Blocks for Read & Write)
+    always @(posedge wclk or posedge rst) begin
         if (rst) begin
             count <= 0;
-        end else begin
-            case ({we, re})
-                2'b10: if (count < $unsigned(DEPTH[2:0])) count <= count + 1; // Write
-                2'b01: if (count > 0) count <= count - 1;  // Read
-                default: count <= count; // No change
-            endcase
+        end else if (we && count < DEPTH) begin
+            count <= count + 1; // Increment on write
+        end
+    end
+
+    always @(posedge rclk or posedge rst) begin
+        if (rst) begin
+            count <= 0;
+        end else if (re && count > 0) begin
+            count <= count - 1; // Decrement on read
         end
     end
 
     // Output assignments
     assign uo_out[3:0] = data_out; // 4-bit data output
     assign uo_out[4]   = (count == 0);  // Empty flag
-    assign uo_out[5]   = (count == DEPTH[2:0]); // Full flag
+    assign uo_out[5]   = (count == DEPTH); // Full flag
     assign uo_out[7:6] = 2'b00; // Reserved for future use
     assign uio_out     = 8'b0;  // No output on IOs
     assign uio_oe      = 8'b0;  // Set IOs to input mode
@@ -71,8 +73,8 @@ module tt_um_asyfifo (
     // Prevent warnings for unused signals
     (* unused *) wire [7:5] unused_ui_in = ui_in[7:5];
     (* unused *) wire [7:4] unused_uio_in = uio_in[7:4];
-    (* unused *) wire unused_rst_n = rst_n;
 
 endmodule
+
 
   
