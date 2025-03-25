@@ -6,74 +6,143 @@ module tt_um_asyfifo (
     input  wire [7:0] uio_in,   // IOs: Input path
     output wire [7:0] uio_out,  // IOs: Output path
     output wire [7:0] uio_oe,   // IOs: Enable path (active high: 0=input, 1=output)
-    input  wire       ena,      // always 1 when the design is powered, so you can ignore it
-    input  wire       clk,      // clock
-    input  wire       rst_n     // reset_n - low to reset
+    input  wire       ena,      // Always 1 when the design is powered
+    input  wire       clk,      // Write clock
+    input  wire       rst_n     // Write reset (active low)
 );
 
-    parameter DEPTH = 8;  // FIFO depth (small for Tiny Tapeout)
-    
-    // Signal mapping
-    wire wclk  = ui_in[2]; // Write clock
-    wire rclk  = ui_in[3]; // Read clock
-    wire we    = ui_in[0]; // Write enable
-    wire re    = ui_in[1]; // Read enable
-    wire rst   = ~ui_in[4]; // Active-high reset
-    wire [3:0] data_in = uio_in[3:0]; // 4-bit data input
+    wire rd_clk, rd_rst;
 
-    // FIFO memory and control signals
-    reg [3:0] mem [0:DEPTH-1];
-    reg [2:0] w_ptr = 0, r_ptr = 0; // 3-bit pointers for 8-depth FIFO
-    reg [2:0] count = 0;  // Track FIFO occupancy
-    reg [3:0] data_out;
+    // Instantiate clock divider for read clock and reset
+    clock_divider clk_div (
+        .wr_clk(clk),
+        .wr_rst(~rst_n), // Convert active-low reset
+        .rd_clk(rd_clk),
+        .rd_rst(rd_rst)
+    );
 
-    // FIFO Write Operation
-    always @(posedge wclk or posedge rst) begin
-        if (rst) begin
-            w_ptr <= 0;
-        end else if (we && count < $unsigned(DEPTH[2:0])) begin
-            mem[w_ptr] <= data_in;
-            w_ptr <= (w_ptr + 1) % DEPTH;  // Wrap-around logic
-        end
-    end
+    // Instantiate FIFO
+    async_fifo #(
+        .DATA_WIDTH(4), 
+        .ADDR_WIDTH(3)
+    ) as_fifo (
+        .wr_clk(clk),
+        .wr_rst(~rst_n),
+        .rd_clk(rd_clk),
+        .rd_rst(rd_rst),
+        .wr_en(ui_in[0]),
+        .rd_en(ui_in[1]),
+        .wr_data(ui_in[5:2]),
+        .full(uo_out[0]),
+        .empty(uo_out[1]),
+        .rd_data(uo_out[5:2])
+    );
 
-    // FIFO Read Operation
-    always @(posedge rclk or posedge rst) begin
-        if (rst) begin
-            r_ptr <= 0;
-        end else if (re && count > 0) begin
-            data_out <= mem[r_ptr];
-            r_ptr <= (r_ptr + 1) % DEPTH; // Wrap-around logic
-        end
-    end
-
-    // FIFO Count Management
-    always @(posedge wclk or posedge rclk or posedge rst) begin
-        if (rst) begin
-            count <= 0;
-        end else begin
-            case ({we, re})
-                2'b10: if (count < $unsigned(DEPTH[2:0])) count <= count + 1; // Write
-                2'b01: if (count > 0) count <= count - 1;  // Read
-                default: count <= count; // No change
-            endcase
-        end
-    end
-
-    // Output assignments
-    assign uo_out[3:0] = data_out; // 4-bit data output
-    assign uo_out[4]   = (count == 0);  // Empty flag
-    assign uo_out[5]   = (count == DEPTH[2:0]); // Full flag
-    assign uo_out[7:6] = 2'b00; // Reserved for future use
-    assign uio_out     = 8'b0;  // No output on IOs
-    assign uio_oe      = 8'b0;  // Set IOs to input mode
-
-    // Prevent warnings for unused signals
-    (* unused *) wire [7:5] unused_ui_in = ui_in[7:5];
-    (* unused *) wire [7:4] unused_uio_in = uio_in[7:4];
-    (* unused *) wire unused_rst_n = rst_n;
+    // Set unused outputs to 0
+    assign uo_out[7:6] = 2'b00;
+    assign uio_out = 8'b00000000;
+    assign uio_oe = 8'b00000000;
+    wire _unused = &{ena, 1'b0};
 
 endmodule
+
+// Clock divider module
+module clock_divider (
+    input wire wr_clk,  
+    input wire wr_rst,  
+    output reg rd_clk,  
+    output reg rd_rst  
+);
+    reg [3:0] counter = 0;
+
+    always @(posedge wr_clk or posedge wr_rst) begin
+        if (wr_rst) begin
+            counter <= 0;
+            rd_clk <= 0;
+            rd_rst <= 1;
+        end else begin
+            counter <= counter + 1;
+            if (counter == 2) begin
+                rd_clk <= ~rd_clk;
+                counter <= 0;
+            end
+            rd_rst <= 0;
+        end
+    end
+endmodule
+
+// Asynchronous FIFO
+module async_fifo #(
+    parameter DATA_WIDTH = 4,  
+    parameter ADDR_WIDTH = 3  
+)(
+    input  wire wr_clk,    
+    input  wire wr_rst,    
+    input  wire rd_clk,    
+    input  wire rd_rst,    
+    input  wire wr_en,     
+    input  wire rd_en,     
+    input  wire [DATA_WIDTH-1:0] wr_data,  
+    output reg  [DATA_WIDTH-1:0] rd_data,  
+    output wire full,     
+    output wire empty     
+);
+
+    localparam DEPTH = 1 << ADDR_WIDTH;
+    reg [DATA_WIDTH-1:0] mem [0:DEPTH-1];
+    reg [ADDR_WIDTH:0] wr_ptr = 0, rd_ptr = 0;
+    reg [ADDR_WIDTH:0] wr_ptr_gray = 0, wr_ptr_gray_sync = 0;
+    reg [ADDR_WIDTH:0] rd_ptr_gray = 0, rd_ptr_gray_sync = 0;
+
+    function [ADDR_WIDTH:0] bin2gray(input [ADDR_WIDTH:0] bin);
+        bin2gray = bin ^ (bin >> 1);
+    endfunction
+
+    function [ADDR_WIDTH:0] gray2bin(input [ADDR_WIDTH:0] gray);
+        integer i;
+        reg [ADDR_WIDTH:0] bin;
+        bin = gray[ADDR_WIDTH];
+        for (i = ADDR_WIDTH-1; i >= 0; i = i - 1)
+            bin[i] = bin[i+1] ^ gray[i];
+        gray2bin = bin;
+    endfunction
+
+    always @(posedge wr_clk or posedge wr_rst) begin
+        if (wr_rst) begin
+            wr_ptr <= 0;
+            wr_ptr_gray <= 0;
+        end else if (wr_en && !full) begin
+            mem[wr_ptr[ADDR_WIDTH-1:0]] <= wr_data;
+            wr_ptr <= wr_ptr + 1;
+            wr_ptr_gray <= bin2gray(wr_ptr + 1);
+        end
+    end
+
+    always @(posedge rd_clk or posedge rd_rst) begin
+        if (rd_rst) begin
+            rd_ptr <= 0;
+            rd_ptr_gray <= 0;
+            rd_data <= 0;
+        end else if (rd_en && !empty) begin  
+            rd_data <= mem[rd_ptr[ADDR_WIDTH-1:0]];
+            rd_ptr <= rd_ptr + 1;
+            rd_ptr_gray <= bin2gray(rd_ptr + 1);
+        end
+    end
+
+    always @(posedge rd_clk) begin
+        wr_ptr_gray_sync <= wr_ptr_gray;
+    end
+
+    always @(posedge wr_clk) begin
+        rd_ptr_gray_sync <= rd_ptr_gray;
+    end
+
+    assign full = (wr_ptr_gray == {~rd_ptr_gray_sync[ADDR_WIDTH:ADDR_WIDTH-1], rd_ptr_gray_sync[ADDR_WIDTH-2:0]});
+    assign empty = (rd_ptr_gray == wr_ptr_gray_sync);
+
+endmodule  
+
 
  
 
